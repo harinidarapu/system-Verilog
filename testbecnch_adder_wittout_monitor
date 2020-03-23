@@ -1,0 +1,247 @@
+// design Info
+module adder(
+  input 	   clk	,
+  input 	   reset,
+  input  [3:0] a	,
+  input  [3:0] b	,
+  input        valid,
+  output [6:0] c  		); 
+  
+  reg [6:0] tmp_c;
+  
+  //Reset 
+  always @(posedge reset) 
+    tmp_c <= 0;
+   
+  // Waddition operation
+  always @(posedge clk) 
+    if (valid)    tmp_c <= a + b;
+  
+  assign c = tmp_c;
+
+endmodule
+// .................................................................
+// TRANSACTION
+class transaction;
+  
+  //declaring the transaction items
+  rand bit [3:0] a;
+  rand bit [3:0] b;
+       bit [6:0] c;
+  function void display(string name);
+    $display("-------------------------");
+    $display("- %s ",name);
+    $display("-------------------------");
+    $display("- a = %0d, b = %0d",a,b);
+    $display("- c = %0d",c);
+    $display("-------------------------");
+  endfunction
+endclass
+//................................................................
+//Generator
+class generator;
+  
+  //declaring transaction class 
+  rand transaction trans;
+  
+  //repeat count, to specify number of items to generate
+  int  repeat_count;
+  
+  //mailbox, to generate and send the packet to driver
+  mailbox gen2driv;
+  
+  //event, to indicate the end of transaction generation
+  event ended;
+  
+  //constructor
+  function new(mailbox gen2driv);
+    //getting the mailbox handle from env, in order to share the transaction packet between the generator and driver, the same mailbox is shared between both.
+    this.gen2driv = gen2driv;
+  endfunction
+  
+  //main task, generates(create and randomizes) the repeat_count number of transaction packets and puts into mailbox
+  task main();
+    repeat(repeat_count) begin
+    trans = new();
+    if( !trans.randomize() ) $fatal("Gen:: trans randomization failed");
+      trans.display("[ Generator ]");
+      gen2driv.put(trans);
+    end
+    -> ended; //triggering indicatesthe end of generation
+  endtask
+  
+endclass
+//................................................................
+// Driver
+
+class driver;
+  
+  //used to count the number of transactions
+  int no_transactions;
+  
+  //creating virtual interface handle
+  virtual intf vif;
+  
+  //creating mailbox handle
+  mailbox gen2driv;
+  
+  //constructor
+  function new(virtual intf vif,mailbox gen2driv);
+    //getting the interface
+    this.vif = vif;
+    //getting the mailbox handles from  environment 
+    this.gen2driv = gen2driv;
+  endfunction
+  
+  //Reset task, Reset the Interface signals to default/initial values
+  task reset;
+    wait(vif.reset);
+    $display("[ DRIVER ] ----- Reset Started -----");
+    vif.a <= 0;
+    vif.b <= 0;
+    vif.valid <= 0;
+    wait(!vif.reset);
+    $display("[ DRIVER ] ----- Reset Ended   -----");
+  endtask
+  
+  //drivers the transaction items to interface signals
+  task main;
+    forever begin
+      transaction trans;
+      gen2driv.get(trans);
+      @(posedge vif.clk);
+      vif.valid <= 1;
+      vif.a     <= trans.a;
+      vif.b     <= trans.b;
+      @(posedge vif.clk);
+      vif.valid <= 0;
+      trans.c   = vif.c;
+      @(posedge vif.clk);
+      trans.display("[ Driver ]");
+      no_transactions++;
+    end
+  endtask
+  
+endclass
+//..........................................................................
+//Environment
+class environment;
+  
+  //generator and driver instance
+  generator gen;
+  driver    driv;
+  
+  //mailbox handle's
+  mailbox gen2driv;
+  
+  //virtual interface
+  virtual intf vif;
+  
+  //constructor
+  function new(virtual intf vif);
+    //get the interface from test
+    this.vif = vif;
+    
+    //creating the mailbox (Same handle will be shared across generator and driver)
+    gen2driv = new();
+    
+    //creating generator and driver
+    gen  = new(gen2driv);
+    driv = new(vif,gen2driv);
+  endfunction
+  
+  //
+  task pre_test();
+    driv.reset();
+  endtask
+  
+  task test();
+    fork 
+    gen.main();
+    driv.main();
+    join_any
+  endtask
+  
+  task post_test();
+    wait(gen.ended.triggered);
+    wait(gen.repeat_count == driv.no_transactions);
+  endtask  
+  
+  //run task
+  task run;
+    pre_test();
+    test();
+    post_test();
+    $finish;
+  endtask
+  
+endclass
+//.................................................................
+// test
+program test(intf i_intf);
+  
+  //declaring environment instance
+  environment env;
+  
+  initial begin
+    //creating environment
+    env = new(i_intf);
+    
+    //setting the repeat count of generator as 4, means to generate 4 packets
+    env.gen.repeat_count = 4;
+    
+    //calling run of env, it interns calls generator and driver main tasks.
+    env.run();
+  end
+endprogram
+//....................................................
+// Interface
+interface intf(input logic clk,reset);
+  
+  //declaring the signals
+  logic       valid;
+  logic [3:0] a;
+  logic [3:0] b;
+  logic [6:0] c;
+  
+endinterface
+//...............................................................
+tb_top
+
+module tbench_top;
+  
+  //clock and reset signal declaration
+  bit clk;
+  bit reset;
+  
+  //clock generation
+  always #5 clk = ~clk;
+  
+  //reset Generation
+  initial begin
+    reset = 1;
+    #5 reset =0;
+  end
+  
+  
+  //creatinng instance of interface, inorder to connect DUT and testcase
+  intf i_intf(clk,reset);
+  
+  //Testcase instance, interface handle is passed to test as an argument
+  test t1(i_intf);
+  
+  //DUT instance, interface signals are connected to the DUT ports
+  adder DUT (
+    .clk(i_intf.clk),
+    .reset(i_intf.reset),
+    .a(i_intf.a),
+    .b(i_intf.b),
+    .valid(i_intf.valid),
+    .c(i_intf.c)
+   );
+  
+  //enabling the wave dump
+  initial begin 
+    $dumpfile("dump.vcd"); $dumpvars;
+  end
+endmodule
